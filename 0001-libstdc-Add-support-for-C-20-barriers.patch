@@ -1,0 +1,692 @@
+From 3706201ee2864a240ef8b0e23d05b7c8c6ef4ca4 Mon Sep 17 00:00:00 2001
+From: Thomas Rodgers <trodgers@redhat.com>
+Date: Fri, 20 Nov 2020 16:26:56 -0800
+Subject: [PATCH] libstdc++: Add support for C++20 barriers
+
+Adds <barrier>
+
+libstdc++/ChangeLog:
+
+	* include/Makefile.am (std_headers): Add new header.
+	* include/Makefile.in: Regenerate.
+	* include/std/barrier: New file.
+	* include/std/version: Add __cpp_lib_barrier feature test macro.
+	* testsuite/30_thread/barrier/1.cc: New test.
+	* testsuite/30_thread/barrier/2.cc: Likewise.
+	* testsuite/30_thread/barrier/arrive_and_drop.cc: Likewise.
+	* testsuite/30_thread/barrier/arrive_and_wait.cc: Likewise.
+	* testsuite/30_thread/barrier/arrive.cc: Likewise.
+	* testsuite/30_thread/barrier/completion.cc: Likewise.
+	* testsuite/30_thread/barrier/max.cc: Likewise.
+---
+ libstdc++-v3/include/Makefile.am              |   1 +
+ libstdc++-v3/include/Makefile.in              |   1 +
+ libstdc++-v3/include/std/barrier              | 258 ++++++++++++++++++
+ libstdc++-v3/include/std/version              |   3 +
+ .../testsuite/30_threads/barrier/1.cc         |  27 ++
+ .../testsuite/30_threads/barrier/2.cc         |  27 ++
+ .../testsuite/30_threads/barrier/arrive.cc    |  51 ++++
+ .../30_threads/barrier/arrive_and_drop.cc     |  49 ++++
+ .../30_threads/barrier/arrive_and_wait.cc     |  51 ++++
+ .../30_threads/barrier/completion.cc          |  54 ++++
+ .../testsuite/30_threads/barrier/max.cc       |  44 +++
+ 11 files changed, 566 insertions(+)
+ create mode 100644 libstdc++-v3/include/std/barrier
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/1.cc
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/2.cc
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/arrive.cc
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/arrive_and_drop.cc
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/arrive_and_wait.cc
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/completion.cc
+ create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/max.cc
+
+diff --git a/libstdc++-v3/include/Makefile.am b/libstdc++-v3/include/Makefile.am
+index ca413b8fdfe..a20dd461fd1 100644
+--- a/libstdc++-v3/include/Makefile.am
++++ b/libstdc++-v3/include/Makefile.am
+@@ -30,6 +30,7 @@ std_headers = \
+ 	${std_srcdir}/any \
+ 	${std_srcdir}/array \
+ 	${std_srcdir}/atomic \
++	${std_srcdir}/barrier \
+ 	${std_srcdir}/bit \
+ 	${std_srcdir}/bitset \
+ 	${std_srcdir}/charconv \
+diff --git a/libstdc++-v3/include/Makefile.in b/libstdc++-v3/include/Makefile.in
+index ef2dc18965b..63f82ef9a5e 100644
+--- a/libstdc++-v3/include/Makefile.in
++++ b/libstdc++-v3/include/Makefile.in
+@@ -376,6 +376,7 @@ std_headers = \
+ 	${std_srcdir}/any \
+ 	${std_srcdir}/array \
+ 	${std_srcdir}/atomic \
++	${std_srcdir}/barrier \
+ 	${std_srcdir}/bit \
+ 	${std_srcdir}/bitset \
+ 	${std_srcdir}/charconv \
+diff --git a/libstdc++-v3/include/std/barrier b/libstdc++-v3/include/std/barrier
+new file mode 100644
+index 00000000000..a6cc6a058dd
+--- /dev/null
++++ b/libstdc++-v3/include/std/barrier
+@@ -0,0 +1,258 @@
++// <barrier> -*- C++ -*-
++
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// This implementation is based on libcxx/include/barrier
++//===-- barrier.h --------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===---------------------------------------------------------------===//
++
++#ifndef _GLIBCXX_BARRIER
++#define _GLIBCXX_BARRIER 1
++
++#pragma GCC system_header
++
++#if __cplusplus > 201703L
++#include <bits/c++config.h>
++
++#if defined(_GLIBCXX_HAS_GTHREADS)
++#define __cpp_lib_barrier 201907L
++#include <bits/atomic_base.h>
++#include <bits/atomic_wait.h>
++#include <bits/functional_hash.h>
++
++#include <memory>
++
++namespace std _GLIBCXX_VISIBILITY(default)
++{
++_GLIBCXX_BEGIN_NAMESPACE_VERSION
++
++  struct __empty_completion
++  {
++    _GLIBCXX_ALWAYS_INLINE void
++    operator()() noexcept
++    { }
++  };
++
++/*
++
++The default implementation of __tree_barrier is a classic tree barrier.
++
++It looks different from literature pseudocode for two main reasons:
++ 1. Threads that call into std::barrier functions do not provide indices,
++    so a numbering step is added before the actual barrier algorithm,
++    appearing as an N+1 round to the N rounds of the tree barrier.
++ 2. A great deal of attention has been paid to avoid cache line thrashing
++    by flattening the tree structure into cache-line sized arrays, that
++    are indexed in an efficient way.
++
++*/
++
++  using __barrier_phase_t = uint8_t;
++
++  template<typename _CompletionF>
++    class __tree_barrier
++    {
++      struct alignas(64) /* naturally-align the heap state */ __state_t
++      {
++	struct
++	{
++	  __atomic_base<__barrier_phase_t> __phase = { 0 };
++	} __tickets[64];
++      };
++
++      ptrdiff_t _M_expected;
++      unique_ptr<char[]> _M_state_allocation;
++      __state_t* 		_M_state;
++      __atomic_base<ptrdiff_t> _M_expected_adjustment;
++      _CompletionF _M_completion;
++
++      using __atomic_phase_ref_t = std::__atomic_ref<__barrier_phase_t>;
++      using __atomic_phase_const_ref_t = std::__atomic_ref<const __barrier_phase_t>;
++      static constexpr size_t __phase_alignment =
++		      __atomic_phase_ref_t::required_alignment;
++      alignas(__phase_alignment) __barrier_phase_t  _M_phase;
++
++      static __gthread_t
++      _S_get_tid() noexcept
++      {
++#ifdef __GLIBC__
++	// For the GNU C library pthread_self() is usable without linking to
++	// libpthread.so but returns 0, so we cannot use it in single-threaded
++	// programs, because this_thread::get_id() != thread::id{} must be true.
++	// We know that pthread_t is an integral type in the GNU C library.
++	if (!__gthread_active_p())
++	  return 1;
++#endif
++	return __gthread_self();
++      }
++
++      bool
++      _M_arrive(__barrier_phase_t __old_phase)
++      {
++	__barrier_phase_t const __half_step = __old_phase + 1,
++				__full_step = __old_phase + 2;
++	size_t __current_expected = _M_expected;
++	size_t __current = _Hash_impl::hash(_S_get_tid())
++				% ((_M_expected + 1) >> 1);
++	for (int __round = 0; ; ++__round)
++	  {
++	    if (__current_expected <= 1)
++		return true;
++	    size_t const __end_node = ((__current_expected + 1) >> 1),
++			 __last_node = __end_node - 1;
++	    for (; ; ++__current)
++	      {
++		if (__current == __end_node)
++		  __current = 0;
++		__barrier_phase_t __expect = __old_phase;
++		if (__current == __last_node && (__current_expected & 1))
++		  {
++		    if (_M_state[__current].__tickets[__round].__phase
++			.compare_exchange_strong(__expect, __full_step,
++						 memory_order_acq_rel))
++		      break;     // I'm 1 in 1, go to next __round
++		  }
++		else if (_M_state[__current].__tickets[__round].__phase
++			 .compare_exchange_strong(__expect, __half_step,
++						  memory_order_acq_rel))
++		  {
++		    return false; // I'm 1 in 2, done with arrival
++		  }
++		else if (__expect == __half_step)
++		  {
++		    if (_M_state[__current].__tickets[__round].__phase
++			.compare_exchange_strong(__expect, __full_step,
++						 memory_order_acq_rel))
++		      break;    // I'm 2 in 2, go to next __round
++		  }
++	      }
++	    __current_expected = __last_node + 1;
++	    __current >>= 1;
++	  }
++      }
++
++    public:
++      using arrival_token = __barrier_phase_t;
++
++      static constexpr ptrdiff_t
++      max() noexcept
++      { return __PTRDIFF_MAX__; }
++
++      __tree_barrier(ptrdiff_t __expected,
++		     _CompletionF __completion = _CompletionF())
++	  : _M_expected(__expected), _M_expected_adjustment(0),
++	    _M_completion(move(__completion)), _M_phase(0)
++      {
++	size_t const __count = (_M_expected + 1) >> 1;
++	size_t const __size = sizeof(__state_t) * __count;
++	size_t __allocation_size = __size + alignof(__state_t);
++	_M_state_allocation = unique_ptr<char[]>(new char[__allocation_size]);
++	void* __allocation = _M_state_allocation.get();
++	void* const __state = align(alignof(__state_t), __size, __allocation,
++				      __allocation_size);
++	_M_state = new (__state) __state_t[__count];
++      }
++
++      [[nodiscard]] arrival_token
++      arrive(ptrdiff_t __update)
++      {
++	__atomic_phase_ref_t __phase(_M_phase);
++	auto const __old_phase = __phase.load(memory_order_relaxed);
++	for(; __update; --__update)
++	  {
++	    if(_M_arrive(__old_phase))
++	      {
++		_M_completion();
++		_M_expected += _M_expected_adjustment.load(memory_order_relaxed);
++		_M_expected_adjustment.store(0, memory_order_relaxed);
++		__phase.store(__old_phase + 2, memory_order_release);
++		__phase.notify_all();
++	      }
++	  }
++	return __old_phase;
++      }
++
++      void
++      wait(arrival_token&& __old_phase) const
++      {
++	__atomic_phase_const_ref_t __phase(_M_phase);
++	auto const __test_fn = [=, this]
++	  {
++	    return __phase.load(memory_order_acquire) != __old_phase;
++	  };
++	std::__atomic_wait(&_M_phase, __old_phase, __test_fn);
++      }
++
++      void
++      arrive_and_drop()
++      {
++	_M_expected_adjustment.fetch_sub(1, memory_order_relaxed);
++	(void)arrive(1);
++      }
++    };
++
++  template<typename _CompletionF = __empty_completion>
++    class barrier
++    {
++      // Note, we may introduce a "central" barrier algorithm at some point
++      // for more space constrained targets
++      using __algorithm_t = __tree_barrier<_CompletionF>;
++      __algorithm_t _M_b;
++
++    public:
++      using arrival_token = typename __tree_barrier<_CompletionF>::arrival_token;
++
++      static constexpr ptrdiff_t
++      max() noexcept
++      { return __algorithm_t::max(); }
++
++      barrier(ptrdiff_t __count, _CompletionF __completion = _CompletionF())
++	  : _M_b(__count, std::move(__completion))
++      { }
++
++      barrier(barrier const&) = delete;
++      barrier& operator=(barrier const&) = delete;
++
++      [[nodiscard]] arrival_token
++      arrive(ptrdiff_t __update = 1)
++      { return _M_b.arrive(__update); }
++
++      void
++      wait(arrival_token&& __phase) const
++      { _M_b.wait(std::move(__phase)); }
++
++      void
++      arrive_and_wait()
++      { wait(arrive()); }
++
++      void
++      arrive_and_drop()
++      { _M_b.arrive_and_drop(); }
++    };
++
++_GLIBCXX_END_NAMESPACE_VERSION
++} // namespace
++#endif // _GLIBCXX_HAS_GTHREADS
++#endif // __cplusplus > 201703L
++#endif // _GLIBCXX_BARRIER
++
+diff --git a/libstdc++-v3/include/std/version b/libstdc++-v3/include/std/version
+index 42ed7cb74d3..b7458a46909 100644
+--- a/libstdc++-v3/include/std/version
++++ b/libstdc++-v3/include/std/version
+@@ -197,6 +197,9 @@
+ #if _GLIBCXX_HOSTED
+ #define __cpp_lib_array_constexpr 201811L
+ #define __cpp_lib_assume_aligned 201811L
++#ifdef _GLIBCXX_HAS_GTHREADS
++#define __cpp_lib_barrier 201907L
++#endif
+ #define __cpp_lib_bind_front 201907L
+ // FIXME: #define __cpp_lib_execution 201902L
+ #define __cpp_lib_integer_comparison_functions 202002L
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/1.cc b/libstdc++-v3/testsuite/30_threads/barrier/1.cc
+new file mode 100644
+index 00000000000..0b38160a58b
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/1.cc
+@@ -0,0 +1,27 @@
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++2a" }
++// { dg-do compile { target c++2a } }
++
++#include <barrier>
++
++#ifndef __cpp_lib_barrier
++# error "Feature-test macro for barrier missing in <barrier>"
++#elif __cpp_lib_barrier != 201907L
++# error "Feature-test macro for barrier has wrong value in <barrier>"
++#endif
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/2.cc b/libstdc++-v3/testsuite/30_threads/barrier/2.cc
+new file mode 100644
+index 00000000000..1d8d83639e0
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/2.cc
+@@ -0,0 +1,27 @@
++// Copyright (C) 2019-2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// { dg-options "-std=gnu++2a" }
++// { dg-do compile { target c++2a } }
++
++#include <version>
++
++#ifndef __cpp_lib_barrier
++# error "Feature-test macro for barrier missing in <version>"
++#elif __cpp_lib_barrier != 201907L
++# error "Feature-test macro for barrier has wrong value in <version>"
++#endif
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/arrive.cc b/libstdc++-v3/testsuite/30_threads/barrier/arrive.cc
+new file mode 100644
+index 00000000000..c128d5ea794
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/arrive.cc
+@@ -0,0 +1,51 @@
++// { dg-options "-std=gnu++2a -pthread" }
++// { dg-do run { target c++2a } }
++// { dg-require-effective-target pthread }
++// { dg-require-gthreads "" }
++
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// This implementation is based on libcxx/test/std/thread/thread.barrier/arrive.pass.cpp
++//===----------------------------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include <barrier>
++#include <thread>
++
++#include <testsuite_hooks.h>
++
++int main(int, char**)
++{
++  std::barrier<> b(2);
++
++  auto tok = b.arrive();
++  std::thread t([&](){
++    (void)b.arrive();
++  });
++  b.wait(std::move(tok));
++  t.join();
++
++  auto tok2 = b.arrive(2);
++  b.wait(std::move(tok2));
++  return 0;
++}
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/arrive_and_drop.cc b/libstdc++-v3/testsuite/30_threads/barrier/arrive_and_drop.cc
+new file mode 100644
+index 00000000000..b7f9404bc5d
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/arrive_and_drop.cc
+@@ -0,0 +1,49 @@
++// { dg-options "-std=gnu++2a -pthread" }
++// { dg-do run { target c++2a } }
++// { dg-require-effective-target pthread }
++// { dg-require-gthreads "" }
++
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// This implementation is based on libcxx/test/std/thread/thread.barrier/arrive_and_drop.pass.cpp
++//===----------------------------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include <barrier>
++#include <thread>
++
++#include <testsuite_hooks.h>
++
++int main(int, char**)
++{
++  std::barrier<> b(2);
++
++  std::thread t([&](){
++    b.arrive_and_drop();
++  });
++
++  b.arrive_and_wait();
++  b.arrive_and_wait();
++  t.join();
++  return 0;
++}
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/arrive_and_wait.cc b/libstdc++-v3/testsuite/30_threads/barrier/arrive_and_wait.cc
+new file mode 100644
+index 00000000000..b2940ae7c34
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/arrive_and_wait.cc
+@@ -0,0 +1,51 @@
++// { dg-options "-std=gnu++2a -pthread" }
++// { dg-do run { target c++2a } }
++// { dg-require-effective-target pthread }
++// { dg-require-gthreads "" }
++
++
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// This implementation is based on libcxx/test/std/thread/thread.barrier/arrive_and_drop.pass.cpp
++//===----------------------------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include <barrier>
++#include <thread>
++
++#include <testsuite_hooks.h>
++
++int main(int, char**)
++{
++  std::barrier<> b(2);
++
++  std::thread t([&](){
++    for(int i = 0; i < 10; ++i)
++      b.arrive_and_wait();
++  });
++  for(int i = 0; i < 10; ++i)
++    b.arrive_and_wait();
++  t.join();
++
++  return 0;
++}
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/completion.cc b/libstdc++-v3/testsuite/30_threads/barrier/completion.cc
+new file mode 100644
+index 00000000000..8f37eecd8ed
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/completion.cc
+@@ -0,0 +1,54 @@
++// { dg-options "-std=gnu++2a -pthread" }
++// { dg-do run { target c++2a } }
++// { dg-require-effective-target pthread }
++// { dg-require-gthreads "" }
++
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// This implementation is based on libcxx/test/std/thread/thread.barrier/completion.pass.cpp
++//===----------------------------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include <barrier>
++#include <thread>
++
++#include <testsuite_hooks.h>
++
++int main(int, char**)
++{
++  int x = 0;
++  auto comp = [&] { x += 1; };
++  std::barrier<decltype(comp)> b(2, comp);
++
++  std::thread t([&](){
++      for(int i = 0; i < 10; ++i)
++	b.arrive_and_wait();
++  });
++
++  for(int i = 0; i < 10; ++i)
++    b.arrive_and_wait();
++
++  VERIFY( x == 10 );
++  t.join();
++  return 0;
++}
+diff --git a/libstdc++-v3/testsuite/30_threads/barrier/max.cc b/libstdc++-v3/testsuite/30_threads/barrier/max.cc
+new file mode 100644
+index 00000000000..720037bb2c7
+--- /dev/null
++++ b/libstdc++-v3/testsuite/30_threads/barrier/max.cc
+@@ -0,0 +1,44 @@
++// { dg-options "-std=gnu++2a -pthread" }
++// { dg-do run { target c++2a } }
++// { dg-require-effective-target pthread }
++// { dg-require-gthreads "" }
++
++
++// Copyright (C) 2020 Free Software Foundation, Inc.
++//
++// This file is part of the GNU ISO C++ Library.  This library is free
++// software; you can redistribute it and/or modify it under the
++// terms of the GNU General Public License as published by the
++// Free Software Foundation; either version 3, or (at your option)
++// any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++
++// You should have received a copy of the GNU General Public License along
++// with this library; see the file COPYING3.  If not see
++// <http://www.gnu.org/licenses/>.
++
++// This implementation is based on libcxx/test/std/thread/thread.barrier/max.pass.cpp
++//===----------------------------------------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include <barrier>
++#include <thread>
++
++#include <testsuite_hooks.h>
++
++int main(int, char**)
++{
++  static_assert(std::barrier<>::max() > 0, "");
++  auto l = [](){};
++  static_assert(std::barrier<decltype(l)>::max() > 0, "");
++  return 0;
++}
+-- 
+2.26.2
+
