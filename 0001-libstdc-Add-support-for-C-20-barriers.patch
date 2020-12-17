@@ -1,4 +1,4 @@
-From 60e6d08832993df0a1ef87e0e0b5e0ffc42782cc Mon Sep 17 00:00:00 2001
+From e4622641feccf21f843b2d69c08e349b49df16d2 Mon Sep 17 00:00:00 2001
 From: Thomas Rodgers <trodgers@redhat.com>
 Date: Wed, 16 Dec 2020 19:28:14 -0800
 Subject: [PATCH] libstdc++: Add support for C++20 barriers
@@ -25,16 +25,16 @@ libstdc++/ChangeLog:
  libstdc++-v3/include/Makefile.am              |   1 +
  libstdc++-v3/include/Makefile.in              |   1 +
  libstdc++-v3/include/precompiled/stdc++.h     |   1 +
- libstdc++-v3/include/std/barrier              | 267 ++++++++++++++++++
+ libstdc++-v3/include/std/barrier              | 249 ++++++++++++++++++
  libstdc++-v3/include/std/version              |   3 +
  .../testsuite/30_threads/barrier/1.cc         |  27 ++
  .../testsuite/30_threads/barrier/2.cc         |  27 ++
  .../testsuite/30_threads/barrier/arrive.cc    |  48 ++++
- .../30_threads/barrier/arrive_and_drop.cc     |  46 +++
- .../30_threads/barrier/arrive_and_wait.cc     |  46 +++
+ .../30_threads/barrier/arrive_and_drop.cc     |  46 ++++
+ .../30_threads/barrier/arrive_and_wait.cc     |  46 ++++
  .../30_threads/barrier/completion.cc          |  53 ++++
  .../testsuite/30_threads/barrier/max.cc       |  40 +++
- 13 files changed, 561 insertions(+)
+ 13 files changed, 543 insertions(+)
  create mode 100644 libstdc++-v3/include/std/barrier
  create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/1.cc
  create mode 100644 libstdc++-v3/testsuite/30_threads/barrier/2.cc
@@ -94,10 +94,10 @@ index 692fae76a42..424c0e277d1 100644
  #include <concepts>
 diff --git a/libstdc++-v3/include/std/barrier b/libstdc++-v3/include/std/barrier
 new file mode 100644
-index 00000000000..f3c819774bd
+index 00000000000..db514540e37
 --- /dev/null
 +++ b/libstdc++-v3/include/std/barrier
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,249 @@
 +// <barrier> -*- C++ -*-
 +
 +// Copyright (C) 2020 Free Software Foundation, Inc.
@@ -126,7 +126,7 @@ index 00000000000..f3c819774bd
 +//
 +//===---------------------------------------------------------------===//
 +
-+/** @file include/atomic
++/** @file include/barrier
 + *  This is a Standard C++ Library header.
 + */
 +
@@ -140,9 +140,9 @@ index 00000000000..f3c819774bd
 +#if __cpp_lib_atomic_wait  && __cpp_aligned_new
 +#include <bits/functional_hash.h>
 +#include <bits/std_thread.h>
++#include <bits/unique_ptr.h>
 +
 +#include <array>
-+#include <memory>
 +
 +#define __cpp_lib_barrier 201907L
 +
@@ -185,31 +185,13 @@ index 00000000000..f3c819774bd
 +      struct alignas(64) /* naturally-align the heap state */ __state_t
 +      {
 +	alignas(__phase_alignment) __tickets_t __tickets;
-+
-+	/*
-+	struct __ticket_t
-+	{
-+	  __atomic_base<__barrier_phase_t> __phase
-+	      = { static_cast<__barrier_phase_t>(0) };
-+	};
-+	std::array<__ticket_t, 64> __tickets;
-+	*/
-+
 +      };
 +
 +      ptrdiff_t _M_expected;
-+      // unique_ptr<char[]> _M_state_allocation;
-+      // __state_t* 		_M_state;
 +      unique_ptr<__state_t[]> _M_state;
 +      __atomic_base<ptrdiff_t> _M_expected_adjustment;
 +      _CompletionF _M_completion;
 +
-+      /*
-+      using __atomic_phase_ref_t = std::__atomic_ref<__barrier_phase_t>;
-+      using __atomic_phase_const_ref_t = std::__atomic_ref<const __barrier_phase_t>;
-+      static constexpr size_t __phase_alignment =
-+		      __atomic_phase_ref_t::required_alignment;
-+      */
 +      alignas(__phase_alignment) __barrier_phase_t  _M_phase;
 +
 +      bool
@@ -361,7 +343,7 @@ index 00000000000..f3c819774bd
 +
 +_GLIBCXX_END_NAMESPACE_VERSION
 +} // namespace
-+#endif // _GLIBCXX_HAS_GTHREADS
++#endif // __cpp_lib_atomic_wait  && __cpp_aligned_new
 +#endif // __cplusplus > 201703L
 +#endif // _GLIBCXX_BARRIER
 +
